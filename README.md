@@ -1,0 +1,2 @@
+# bangumi2notion
+将bangumi的个人动画收藏推送到notion中
