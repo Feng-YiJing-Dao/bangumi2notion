@@ -21,8 +21,12 @@ NOTION_DATABASE_ID = os.getenv("NOTION_DATABASE_ID")
 # 3 为 音乐
 # 4 为 游戏
 # 6 为 三次元
-TARGET_SUBJECT_TYPE_CODE = 2
-TARGET_SUBJECT_TYPE_NAME = "动画"
+# TARGET_SUBJECT_TYPE_CODE = 2
+# TARGET_SUBJECT_TYPE_NAME = "动画"
+TARGET_SUBJECT_TYPES = {
+    2: "动画",
+    6: "三次元"
+}
 TAG_LIMIT = 10
 
 # ===============================================================
@@ -114,13 +118,11 @@ def find_notion_page_object_by_bgm_id(bgm_id: int) -> Optional[dict]:
     except requests.exceptions.RequestException:
         return None
 
-def is_update_required(acg_item: ACG, notion_page: dict, new_status: str) -> bool:
+def is_update_required(acg_item: ACG, notion_page: dict, new_status: str, subject_type_name: str) -> bool:
     props = notion_page.get('properties', {})
     def get_notion_select(prop_name):
         select_obj = props.get(prop_name, {}).get('select')
-        if select_obj:
-            return select_obj.get('name')
-        return None
+        return select_obj.get('name') if select_obj else None
     def get_notion_number(prop_name):
         return props.get(prop_name, {}).get('number')
     def get_notion_multiselect(prop_name):
@@ -130,6 +132,8 @@ def is_update_required(acg_item: ACG, notion_page: dict, new_status: str) -> boo
         return "".join([text['plain_text'] for text in text_list])
 
     if new_status != get_notion_select('状态'): return True
+    # 新增对“类型”字段的检查，确保“动画”和“三次元”能被正确区分和更新
+    if subject_type_name != get_notion_select('类型'): return True
     bgm_rate_str = str(acg_item.rate) if acg_item.rate > 0 else None
     if bgm_rate_str != get_notion_select('我的评分'): return True
     if acg_item.ep_status != get_notion_number('观看进度'): return True
@@ -141,12 +145,12 @@ def is_update_required(acg_item: ACG, notion_page: dict, new_status: str) -> boo
     if bgm_summary != notion_summary: return True
     return False
 
-def build_notion_properties(acg_item: ACG, status: str) -> dict:
+def build_notion_properties(acg_item: ACG, status: str, subject_type_name: str) -> dict:
     properties = {
         "BGM ID": {"number": acg_item.subject.id},
         "标题": {"title": [{"text": {"content": acg_item.subject.name_cn or acg_item.subject.name}}]},
         "状态": {"select": {"name": status}},
-        "类型": {"select": {"name": TARGET_SUBJECT_TYPE_NAME}},
+        "类型": {"select": {"name": subject_type_name}},
         "BGM链接": {"url": f"https://bgm.tv/subject/{acg_item.subject.id}"},
         "最后同步": {"date": {"start": datetime.now().isoformat()}},
         "观看进度": {"number": acg_item.ep_status},
@@ -160,7 +164,7 @@ def build_notion_properties(acg_item: ACG, status: str) -> dict:
     if acg_item.subject.date:
         properties["放送日期"] = {"date": {"start": acg_item.subject.date}}
     if acg_item.subject.images.get('large'):
-         properties["封面"] = {"files": [{"name": acg_item.subject.images['large'], "type": "external", "external": {"url": acg_item.subject.images['large']}}]}
+        properties["封面"] = {"files": [{"name": acg_item.subject.images['large'], "type": "external", "external": {"url": acg_item.subject.images['large']}}]}
     if acg_item.subject.tags:
         tags_to_sync = [{"name": tag['name'][:100]} for tag in acg_item.subject.tags[:TAG_LIMIT]]
         properties["标签"] = {"multi_select": tags_to_sync}
@@ -169,9 +173,9 @@ def build_notion_properties(acg_item: ACG, status: str) -> dict:
         properties["简介"] = {"rich_text": [{"type": "text", "text": {"content": summary_content}}]}
     return properties
 
-def create_notion_page(acg_item: ACG, status: str):
+def create_notion_page(acg_item: ACG, status: str, subject_type_name: str):
     create_url = "https://api.notion.com/v1/pages"
-    properties = build_notion_properties(acg_item, status)
+    properties = build_notion_properties(acg_item, status, subject_type_name)
     payload = {"parent": {"database_id": NOTION_DATABASE_ID}, "properties": properties}
     try:
         response = http_session.post(create_url, headers=NOTION_API_HEADERS, data=json.dumps(payload))
@@ -180,9 +184,9 @@ def create_notion_page(acg_item: ACG, status: str):
     except requests.exceptions.RequestException as e:
         print(f"  ❌ 创建页面失败: {acg_item.subject.name_cn or acg_item.subject.name}. 错误: {e.response.text}")
 
-def update_notion_page(page_id: str, acg_item: ACG, status: str):
+def update_notion_page(page_id: str, acg_item: ACG, status: str, subject_type_name: str):
     update_url = f"https://api.notion.com/v1/pages/{page_id}"
-    properties = build_notion_properties(acg_item, status)
+    properties = build_notion_properties(acg_item, status, subject_type_name)
     payload = {"properties": properties}
     try:
         response = http_session.patch(update_url, headers=NOTION_API_HEADERS, data=json.dumps(payload))
@@ -200,40 +204,57 @@ if __name__ == "__main__":
     if missing_secrets:
         print("错误：以下必需的环境变量未设置，请在 GitHub Secrets 中配置：", missing_secrets)
         sys.exit(1)
+
     COLLECTION_TYPES = {"想看": 1, "看过": 2, "在看": 3, "搁置": 4, "抛弃": 5}
-    all_bgm_collections: Dict[str, List[ACG]] = {}
-    for type_name, type_code in COLLECTION_TYPES.items():
-        print(f"\n>>> 正在从 Bangumi 获取 '{type_name}' 列表...")
-        collection_list = get_user_collection(BGM_USERNAME, BGM_ACCESS_TOKEN, TARGET_SUBJECT_TYPE_CODE, type_code)
-        all_bgm_collections[type_name] = collection_list
-        print(f">>> 获取完成，'{type_name}' 列表包含 {len(collection_list)} 个条目。")
-    print("\n===================================")
-    print("所有数据获取完毕，开始同步到 Notion...")
-    print("===================================")
+    
+    # 将统计变量移到最外层，以便累计所有类型的总和
     total_new = 0
     total_updated = 0
     total_unchanged = 0
-    for status, collection_list in all_bgm_collections.items():
-        if not collection_list:
-            continue
-        print(f"\n--- 正在同步 '{status}' 列表 ---")
-        for acg_item in collection_list:
-            if not acg_item.subject:
+
+    for subject_code, subject_name in TARGET_SUBJECT_TYPES.items():
+        print(f"\n{'='*20} 开始处理类别: {subject_name} {'='*20}")
+        
+        all_bgm_collections: Dict[str, List[ACG]] = {}
+        for type_name, type_code in COLLECTION_TYPES.items():
+            print(f"\n>>> 正在从 Bangumi 获取 '{subject_name}' 的 '{type_name}' 列表...")
+            # 在 API 调用中使用当前的 subject_code
+            collection_list = get_user_collection(BGM_USERNAME, BGM_ACCESS_TOKEN, subject_code, type_code)
+            all_bgm_collections[type_name] = collection_list
+            print(f">>> 获取完成，'{type_name}' 列表包含 {len(collection_list)} 个条目。")
+
+        print(f"\n===================================")
+        print(f"类别 '{subject_name}' 数据获取完毕，开始同步到 Notion...")
+        print(f"===================================")
+
+        for status, collection_list in all_bgm_collections.items():
+            if not collection_list:
                 continue
-            existing_page_object = find_notion_page_object_by_bgm_id(acg_item.subject.id)
-            if existing_page_object:
-                if is_update_required(acg_item, existing_page_object, status):
-                    update_notion_page(existing_page_object['id'], acg_item, status)
-                    total_updated += 1
+            print(f"\n--- 正在同步 '{status}' 列表 ({subject_name}) ---")
+            for acg_item in collection_list:
+                if not acg_item.subject:
+                    continue
+                
+                existing_page_object = find_notion_page_object_by_bgm_id(acg_item.subject.id)
+                
+                if existing_page_object:
+                    # 在调用时传入 subject_name
+                    if is_update_required(acg_item, existing_page_object, status, subject_name):
+                        update_notion_page(existing_page_object['id'], acg_item, status, subject_name)
+                        total_updated += 1
+                    else:
+                        print(f"  👍 无需变动: {acg_item.subject.name_cn or acg_item.subject.name}")
+                        total_unchanged += 1
                 else:
-                    print(f"  👍 无需变动: {acg_item.subject.name_cn or acg_item.subject.name}")
-                    total_unchanged += 1
-            else:
-                create_notion_page(acg_item, status)
-                total_new += 1
-            time.sleep(0.4)
-    print("\n===================================")
-    print("同步完成！")
+                    # 在调用时传入 subject_name
+                    create_notion_page(acg_item, status, subject_name)
+                    total_new += 1
+                
+                # Bangumi 和 Notion API 都有速率限制，保留适当的延时
+                time.sleep(0.4)
+
+    print("\n\n===================================")
+    print("所有类别同步完成！")
     print(f"✅ 新增条目: {total_new}")
     print(f"🔄️ 更新条目: {total_updated}")
     print(f"👍 无需变动: {total_unchanged}")
