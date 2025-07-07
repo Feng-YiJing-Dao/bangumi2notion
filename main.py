@@ -140,9 +140,9 @@ def is_update_required(acg_item: ACG, notion_page: dict, new_status: str, subjec
     bgm_tags = set([tag['name'] for tag in acg_item.subject.tags[:TAG_LIMIT]])
     notion_tags = set(get_notion_multiselect('标签'))
     if bgm_tags != notion_tags: return True
-    bgm_summary = acg_item.subject.short_summary.strip()
-    notion_summary = get_notion_richtext('简介').strip()
-    if bgm_summary != notion_summary: return True
+    # bgm_summary = acg_item.subject.short_summary.strip()
+    # notion_summary = get_notion_richtext('简介').strip()
+    # if bgm_summary != notion_summary: return True
     return False
 
 def build_notion_properties(acg_item: ACG, status: str, subject_type_name: str) -> dict:
